@@ -1,0 +1,6 @@
+google==3.0.0
+google-cloud-core==2.4.1
+google-cloud-aiplatform==1.99.0
+streamlit==1.28.0
+gunicorn==20.0.4
+python-dotenv==1.0.0
