@@ -1,0 +1,237 @@
+# Healthcare Guardrails Configuration
+# This file defines safety rules and validation parameters for MedSight
+
+# Input Validation Rules
+input_validation:
+  max_query_length: 2000  # Maximum characters in user query
+  min_query_length: 3     # Minimum characters in user query
+  
+  # Blocked patterns - queries containing these will be rejected
+  blocked_patterns:
+    - "prescribe"
+    - "dosage for"
+    - "how much medication"
+    - "should I take"
+    - "instead of seeing a doctor"
+    - "self-diagnose"
+    - "cure for cancer"
+    - "guaranteed treatment"
+  
+  # Emergency keywords - trigger immediate escalation
+  emergency_keywords:
+    - "chest pain"
+    - "difficulty breathing"
+    - "severe bleeding"
+    - "unconscious"
+    - "stroke symptoms"
+    - "heart attack"
+    - "severe allergic reaction"
+    - "anaphylaxis"
+    - "suicidal"
+    - "overdose"
+  
+  # PII patterns to detect and warn about
+  pii_patterns:
+    - regex: '\b\d{3}-\d{2}-\d{4}\b'  # SSN
+      type: "social_security_number"
+    - regex: '\b[A-Z]{2}\d{6}\b'       # Medical record number
+      type: "medical_record_number"
+    - regex: '\b\d{10}\b'               # Phone number
+      type: "phone_number"
+
+# Output Validation Rules
+output_validation:
+  # Always add disclaimers to these types of outputs
+  require_disclaimer:
+    - "diagnosis"
+    - "treatment"
+    - "prognosis"
+    - "medication"
+    - "clinical_finding"
+  
+  # Confidence thresholds
+  confidence_thresholds:
+    high: 0.85      # High confidence
+    medium: 0.65    # Medium confidence
+    low: 0.45       # Low confidence - flag for review
+  
+  # Prohibited phrases in output
+  prohibited_output_phrases:
+    - "definitely"
+    - "certainly"
+    - "100% sure"
+    - "guaranteed"
+    - "you should take"
+    - "I prescribe"
+    - "no need to see a doctor"
+  
+  # Required qualifiers for medical statements
+  required_qualifiers:
+    - "appears to show"
+    - "suggests"
+    - "may indicate"
+    - "consistent with"
+    - "preliminary finding"
+    - "requires clinical correlation"
+
+# Medical Disclaimers
+disclaimers:
+  general: |
+    ⚕️ MEDICAL DISCLAIMER: This analysis is provided for informational purposes only 
+    and is not a substitute for professional medical advice, diagnosis, or treatment. 
+    Always seek the advice of your physician or other qualified health provider with 
+    any questions you may have regarding a medical condition.
+  
+  diagnostic: |
+    ⚕️ DIAGNOSTIC DISCLAIMER: The findings described above are preliminary observations 
+    based on image analysis. These findings must be correlated with clinical history, 
+    physical examination, and other diagnostic tests. Final diagnosis should be made by 
+    a qualified healthcare professional.
+  
+  emergency: |
+    🚨 EMERGENCY NOTICE: Your query suggests a potential medical emergency. 
+    If you are experiencing a medical emergency, please:
+    - Call 911 (US) or your local emergency number immediately
+    - Go to the nearest emergency room
+    - Do not rely on this AI system for emergency medical care
+  
+  treatment: |
+    ⚕️ TREATMENT DISCLAIMER: This system does not provide treatment recommendations. 
+    Any treatment decisions should be made in consultation with your healthcare provider 
+    who can evaluate your complete medical history and current condition.
+  
+  limitation: |
+    ⚠️ LIMITATIONS: AI analysis has inherent limitations and may not detect all 
+    abnormalities. This analysis should be reviewed by a qualified radiologist or 
+    physician. Image quality, technical factors, and AI model limitations may affect 
+    the accuracy of findings.
+
+# Safety Checks
+safety_checks:
+  # Require human review for these conditions
+  human_review_required:
+    confidence_below: 0.65
+    emergency_detected: true
+    critical_finding: true
+    contradictory_information: true
+  
+  # Critical findings that require immediate attention
+  critical_findings:
+    - "pneumothorax"
+    - "aortic dissection"
+    - "intracranial hemorrhage"
+    - "pulmonary embolism"
+    - "acute fracture"
+    - "free air"
+    - "large mass"
+  
+  # Auto-escalation rules
+  escalation:
+    emergency_response_time: 30  # seconds
+    critical_finding_alert: true
+    low_confidence_flag: true
+
+# Compliance Settings
+compliance:
+  # HIPAA compliance
+  hipaa:
+    enabled: true
+    audit_logging: true
+    encryption_required: true
+    access_logging: true
+  
+  # Data retention
+  data_retention:
+    conversation_history_days: 90
+    audit_logs_days: 2555  # 7 years
+    temporary_files_hours: 24
+  
+  # Privacy settings
+  privacy:
+    anonymize_logs: true
+    pii_detection: true
+    pii_redaction: true
+
+# Agent Behavior Rules
+agent_behavior:
+  # Image Analyzer Agent
+  image_analyzer:
+    max_processing_time_seconds: 30
+    require_image_quality_check: true
+    min_image_quality_score: 0.25
+    max_images_per_request: 10
+  
+  # Record Parser Agent
+  record_parser:
+    max_document_size_mb: 50
+    allowed_formats: ["pdf", "txt", "docx", "dicom"]
+    max_documents_per_request: 20
+  
+  # Synthesis Agent
+  synthesis:
+    require_source_citation: true
+    max_synthesis_time_seconds: 45
+    min_data_sources: 2  # Require at least 2 sources for synthesis
+  
+  # QA Agent
+  qa:
+    max_context_messages: 10
+    require_context_relevance: true
+    min_relevance_score: 0.7
+
+# Monitoring & Alerts
+monitoring:
+  # Alert thresholds
+  alerts:
+    error_rate_threshold: 0.05  # 5% error rate
+    response_time_threshold_seconds: 10
+    emergency_detection_rate_threshold: 0.1  # Alert if >10% queries are emergencies
+  
+  # Metrics to track
+  metrics:
+    - "query_count"
+    - "response_time"
+    - "confidence_scores"
+    - "guardrail_triggers"
+    - "emergency_detections"
+    - "human_review_requests"
+    - "error_rate"
+  
+  # Logging levels
+  logging:
+    default_level: "INFO"
+    guardrails_level: "WARNING"
+    agents_level: "INFO"
+    errors_level: "ERROR"
+
+# Feature Flags
+feature_flags:
+  enable_multi_modal: true
+  enable_conversation_history: true
+  enable_reflexion: true
+  enable_emergency_detection: true
+  enable_pii_detection: true
+  enable_confidence_scoring: true
+  enable_human_review: true
+  enable_audit_logging: true
+
+# Rate Limiting
+rate_limiting:
+  requests_per_minute: 60
+  requests_per_hour: 500
+  requests_per_day: 2000
+  concurrent_sessions_per_user: 3
+
+# Model Configuration
+models:
+  medgemma:
+    temperature: 0.0  # Deterministic for medical use
+    max_tokens: 500
+    top_p: 0.95
+    timeout_seconds: 30
+  
+  # Fallback behavior
+  fallback:
+    retry_attempts: 3
+    retry_delay_seconds: 2
+    fallback_message: "I apologize, but I'm unable to process your request at this time. Please try again or consult with a healthcare professional."
