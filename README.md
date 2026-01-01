@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![MedSight](images/med-sight.png)
+![MedSight](images/image_analysis.png)
 
 **A comprehensive, conversational, multi-modal medical AI assistant with healthcare-specific guardrails**
 
@@ -151,7 +151,8 @@ med-sight/
 
 1. **Clone the repository**
    ```bash
-   cd /Users/gabrielpreda/workspace/my_projects/med-sight
+   git clone https://github.com/your-username/med-sight.git
+   cd med-sight
    ```
 
 2. **Create virtual environment**
@@ -172,9 +173,9 @@ med-sight/
    Create a `.env` file:
    ```env
    PROJECT_ID=your-gcp-project-id
-   REGION=us-central1
+   REGION=your-region
    ENDPOINT_ID=your-medgemma-endpoint-id
-   ENDPOINT_REGION=us-central1
+   ENDPOINT_REGION=your-region
    ```
 
 5. **Run the application**
@@ -196,11 +197,15 @@ med-sight/
 2. Ask: "Analyze this chest X-ray"
 3. Review the structured findings with confidence scores
 
+![MedSight](images/image_analysis.png)
+
 ### Multi-Modal Analysis
 
 1. Upload medical images and records (PDF/text)
 2. Ask: "Compare this X-ray with my medical history"
 3. Get comprehensive analysis correlating imaging with clinical data
+
+![MedSight](images/medical_report.png)
 
 ### Follow-up Questions
 
@@ -212,6 +217,8 @@ med-sight/
 - System automatically detects emergency keywords
 - Provides immediate guidance to seek emergency care
 - Does NOT provide emergency medical advice
+
+![MedSight](images/guardrails.png)
 
 ---
 
