@@ -10,7 +10,8 @@ import base64
 from io import BytesIO
 from PIL import Image
 from google.cloud import aiplatform
-
+import json
+import re
 from .base_agent import BaseAgent, AgentType, AgentResult
 
 
@@ -107,9 +108,9 @@ class ImageAnalyzerAgent(BaseAgent):
         
         # Default configuration
         self.default_config = {
-            "max_tokens": 500,
+            "max_tokens": 2500,
             "temperature": 0.0,  # Deterministic for medical use
-            "min_image_quality": 0.6,
+            "min_image_quality": 0.3,
             "enable_quality_check": True,
             "use_dedicated_endpoint": True
         }
@@ -194,28 +195,53 @@ class ImageAnalyzerAgent(BaseAgent):
             System prompt string
         """
         base_prompt = """
-You are a highly experienced and accurate medical imaging AI, trained to assist radiologists 
-in interpreting diagnostic images.
+        You are a highly experienced and accurate medical imaging AI, trained to assist radiologists
+        in interpreting diagnostic images.
 
-You are analyzing a medical image. Your role is to generate a clear, clinically useful 
-description of the scan, identifying relevant anatomical structures, patterns, anomalies, 
-and potential diagnoses. Do not guess or hallucinate findings not evident in the image.
+        You are analyzing a medical image. Your role is to generate a clear, clinically useful
+        description of the scan, identifying relevant anatomical structures, patterns, anomalies,
+        and potential diagnoses. Do not guess or hallucinate findings not evident in the image.
 
-Focus on:
-- Location and characteristics of any visible abnormalities
-- Indicators of common pathologies (e.g., fractures, infiltrates, masses)
-- Whether the image appears normal or requires further evaluation
+        Focus on:
+        - Location and characteristics of any visible abnormalities
+        - Indicators of common pathologies (e.g., fractures, infiltrates, masses)
+        - Whether the image appears normal or requires further evaluation
 
-Use formal, clinical language. If the image quality is too poor to analyze, state this clearly.
+        Use formal, clinical language. If the image quality is too poor to analyze, state this clearly.
 
-Provide your response in the following structure:
-1. SUMMARY: Brief overview (2-3 sentences)
-2. ANATOMICAL STRUCTURES: List visible structures
-3. FINDINGS: Detailed observations
-4. ABNORMALITIES: Any abnormalities detected (or "None detected")
-5. IMPRESSION: Clinical impression
-6. RECOMMENDATIONS: Suggested follow-up or additional imaging if needed
-"""
+        Output rules:
+        - Return valid JSON only
+        - Return only the JSON object, nothing else
+        - Frequent error: to add code fences around the JSON object
+        - Do not use Markdown
+        - Do not include code fences
+        - Do not include any text before or after the JSON
+        - Include all keys shown below
+        - Use empty arrays when appropriate
+        - If no abnormalities are detected, set "abnormalities" to an empty array
+        - If image quality is too poor, mention this clearly in "summary" and "impression"
+
+        Return the response in exactly this JSON structure:
+
+        {
+        "summary": "Brief overview in 2-3 sentences",
+        "anatomical_structures": ["structure 1", "structure 2"],
+        "findings": [
+            {"finding": "Detailed observation 1"},
+            {"finding": "Detailed observation 2"}
+        ],
+        "abnormalities": [
+            {"description": "Abnormality 1"},
+            {"description": "Abnormality 2"}
+        ],
+        "impression": "Clinical impression",
+        "recommendations": ["Recommendation 1", "Recommendation 2"],
+        "image_quality": {
+            "assessed": true,
+            "quality": "good"
+        }
+        }
+        """
         
         if image_type != "unknown":
             base_prompt += f"\n\nThis image is identified as a {image_type} scan."
@@ -286,6 +312,7 @@ Provide your response in the following structure:
                     # ChatCompletion format: extract from choices[0].message.content
                     response_text = prediction_data['choices'][0]['message']['content']
                     self.logger.info(f"✅ Successfully extracted response ({len(response_text)} chars)")
+                    self.logger.info(f"✅ Extracted response: {response_text}")
                     return response_text
                 elif isinstance(prediction_data, str):
                     # Legacy format: direct string response
@@ -312,74 +339,116 @@ Provide your response in the following structure:
             except:
                 pass
             raise
-    
+
+
+
+    def clean_model_output(self, text: str) -> str:
+        text = text.strip()
+
+        # Remove markdown code fences like ```json ... ``` or ``` ... ```
+        text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+
+        return text.strip()
+
+
+    def extract_json_object(self, text: str) -> dict:
+        text = self.clean_model_output(text)
+
+        # Try direct parse
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: extract first JSON object
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            raise ValueError("No JSON object found in model response.")
+
+        return json.loads(match.group(0))
+        
     def _parse_model_response(self, response_text: str) -> ImageAnalysisResult:
-        """
-        Parse the model response into structured format.
-        
-        Args:
-            response_text: Raw text response from MedGemma
-        
-        Returns:
-            ImageAnalysisResult object
-        """
-        # This is a simplified parser - in production, you'd want more robust parsing
-        lines = response_text.split('\n')
-        
-        summary = ""
-        anatomical_structures = []
-        detailed_findings = []
-        abnormalities = []
-        recommendations = []
-        
-        current_section = None
-        
-        for line in lines:
-            line = line.strip()
-            
-            if "SUMMARY:" in line.upper():
-                current_section = "summary"
-                summary = line.split(":", 1)[1].strip() if ":" in line else ""
-            elif "ANATOMICAL STRUCTURES:" in line.upper():
-                current_section = "anatomical"
-            elif "FINDINGS:" in line.upper():
-                current_section = "findings"
-            elif "ABNORMALITIES:" in line.upper():
-                current_section = "abnormalities"
-            elif "IMPRESSION:" in line.upper():
-                current_section = "impression"
-            elif "RECOMMENDATIONS:" in line.upper():
-                current_section = "recommendations"
-            elif line and current_section:
-                if current_section == "summary":
-                    summary += " " + line
-                elif current_section == "anatomical" and line.startswith("-"):
-                    anatomical_structures.append(line[1:].strip())
-                elif current_section == "findings" and line:
-                    detailed_findings.append({"finding": line})
-                elif current_section == "abnormalities" and line.startswith("-"):
-                    abnormalities.append({"description": line[1:].strip()})
-                elif current_section == "recommendations" and line.startswith("-"):
-                    recommendations.append(line[1:].strip())
-        
-        # Calculate confidence based on response completeness
-        confidence = 0.7  # Base confidence
-        if summary:
-            confidence += 0.1
-        if anatomical_structures:
-            confidence += 0.1
-        if detailed_findings:
-            confidence += 0.1
-        
-        return ImageAnalysisResult(
-            summary=summary.strip(),
-            detailed_findings=detailed_findings,
-            anatomical_structures=anatomical_structures,
-            abnormalities=abnormalities,
-            image_quality={"assessed": True},
-            confidence=min(confidence, 0.95),  # Cap at 0.95
-            recommendations=recommendations
-        )
+        try:
+            data = self.extract_json_object(response_text)
+
+
+
+            summary = str(data.get("summary", "")).strip()
+
+            anatomical_structures = data.get("anatomical_structures", [])
+            if not isinstance(anatomical_structures, list):
+                anatomical_structures = [str(anatomical_structures)]
+            anatomical_structures = [str(x).strip() for x in anatomical_structures if str(x).strip()]
+
+            findings_raw = data.get("findings", [])
+            detailed_findings = []
+            if isinstance(findings_raw, list):
+                for item in findings_raw:
+                    if isinstance(item, dict):
+                        finding_text = str(item.get("finding", "")).strip()
+                        if finding_text:
+                            detailed_findings.append({"finding": finding_text})
+                    elif isinstance(item, str) and item.strip():
+                        detailed_findings.append({"finding": item.strip()})
+
+            abnormalities_raw = data.get("abnormalities", [])
+            abnormalities = []
+            if isinstance(abnormalities_raw, list):
+                for item in abnormalities_raw:
+                    if isinstance(item, dict):
+                        desc = str(item.get("description", "")).strip()
+                        if desc:
+                            abnormalities.append({"description": desc})
+                    elif isinstance(item, str) and item.strip():
+                        abnormalities.append({"description": item.strip()})
+
+            impression = str(data.get("impression", "")).strip()
+
+            recommendations_raw = data.get("recommendations", [])
+            if not isinstance(recommendations_raw, list):
+                recommendations_raw = [str(recommendations_raw)]
+            recommendations = [str(x).strip() for x in recommendations_raw if str(x).strip()]
+
+            image_quality = data.get("image_quality", {"assessed": True})
+            if not isinstance(image_quality, dict):
+                image_quality = {"assessed": True, "quality": str(image_quality)}
+
+            if "assessed" not in image_quality:
+                image_quality["assessed"] = True
+
+            # Calculate confidence based on response completeness
+            confidence = 0.7
+            if summary:
+                confidence += 0.1
+            if anatomical_structures:
+                confidence += 0.1
+            if detailed_findings:
+                confidence += 0.1
+
+            return ImageAnalysisResult(
+                summary=summary,
+                detailed_findings=detailed_findings,
+                anatomical_structures=anatomical_structures,
+                abnormalities=abnormalities,
+                image_quality=image_quality,
+                confidence=min(confidence, 0.95),
+                recommendations=recommendations
+            )
+
+        except Exception as ex:
+            self.logger.error(f"❌ JSON parsing failed: {str(ex)}")
+            # Fallback: keep raw text in summary if JSON parsing fails
+            return ImageAnalysisResult(
+                summary=response_text.strip(),
+                detailed_findings=[],
+                anatomical_structures=[],
+                abnormalities=[],
+                image_quality={"assessed": False},
+                confidence=0.4,
+                recommendations=[]
+            )
     
     async def process(
         self,
