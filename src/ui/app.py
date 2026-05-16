@@ -1,364 +1,357 @@
 """
-MedSight - Enhanced Medical Image Analysis Application
+MedSight — AI Medical Assistant (ADK Edition)
 
-This is the new main application integrating all components:
-- Multi-agent system
-- Healthcare guardrails
-- Conversational interface
-- Multi-modal document processing
+Streamlit UI that drives the Google ADK multi-agent pipeline.
 """
 
-import streamlit as st
-from io import BytesIO
-from PIL import Image
-import base64
-import PyPDF2
-import os
 import asyncio
-from dotenv import load_dotenv
-from google.cloud import aiplatform
+import base64
 import logging
+import os
+import uuid
+import json
+from io import BytesIO
 
-# Add parent directory to path for imports
+import PyPDF2
+import streamlit as st
+from dotenv import load_dotenv
+from PIL import Image
+
+# Add project root to sys.path
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-# Import MedSight components
-from src.agents import Orchestrator
-from src.models import (
-    PatientData, MedicalImage, ImageType,
-    Message, MessageRole, ConversationSession,
-    MedicalRecord, RecordType, DocumentFormat
-)
-from src.conversation import SessionManager, ContextManager, MemoryStore
-from src.document_processing.parsers import PDFParser, TextParser
+load_dotenv()
+
+# ADK runtime
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types as genai_types
+
+# MedSight ADK agent
+from src.agents import root_agent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
 # Page configuration
+# ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title='MedSight - AI Medical Assistant',
-    page_icon="images/gemini_avatar.png",
-    initial_sidebar_state='auto',
-    layout="wide"
+    page_title="MedSight – AI Medical Assistant",
+    page_icon="🏥",
+    layout="wide",
+    initial_sidebar_state="auto",
 )
 
-# Custom CSS
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #3184a0;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .disclaimer-box {
-        background-color: #fff3cd;
-        border-left: 5px solid #ffc107;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
-    .emergency-box {
-        background-color: #f8d7da;
-        border-left: 5px solid #dc3545;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+* { font-family: 'Inter', sans-serif; }
+
+.main-header {
+    font-size: 2.4rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, #1a73e8 0%, #0d47a1 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-align: center;
+    margin-bottom: 0.5rem;
+}
+.subtitle {
+    text-align: center;
+    color: #5f6368;
+    font-size: 1rem;
+    margin-bottom: 1.5rem;
+}
+.disclaimer-box {
+    background: linear-gradient(135deg, #fff8e1 0%, #fff3cd 100%);
+    border-left: 5px solid #ffc107;
+    border-radius: 0 8px 8px 0;
+    padding: 0.9rem 1.2rem;
+    margin: 0.8rem 0 1.4rem 0;
+    font-size: 0.88rem;
+    color: #5f4b00;
+}
+.emergency-box {
+    background: linear-gradient(135deg, #fde8e8 0%, #f8d7da 100%);
+    border-left: 5px solid #dc3545;
+    border-radius: 0 8px 8px 0;
+    padding: 1rem 1.2rem;
+    font-weight: 600;
+    color: #721c24;
+}
+.badge {
+    display: inline-block;
+    background: #e8f0fe;
+    color: #1a73e8;
+    border-radius: 20px;
+    padding: 2px 10px;
+    font-size: 0.78rem;
+    font-weight: 500;
+    margin: 2px;
+}
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------------------------------------------------------------------
+# ADK runner (cached so it persists across reruns)
+# ---------------------------------------------------------------------------
+APP_NAME = "medsight"
 
 @st.cache_resource
-def initialize_system():
-    """Initialize the MedSight system"""
-    load_dotenv()
-    
-    PROJECT_ID = os.getenv("PROJECT_ID")
-    REGION = os.getenv("REGION")
-    ENDPOINT_ID = os.getenv("ENDPOINT_ID")
-    ENDPOINT_REGION = os.getenv("ENDPOINT_REGION")
-    
-    logger.info("Initializing Vertex AI API")
-    aiplatform.init(project=PROJECT_ID, location=REGION)
-    
-    endpoint = aiplatform.Endpoint(
-        endpoint_name=ENDPOINT_ID,
-        project=PROJECT_ID,
-        location=ENDPOINT_REGION,
+def get_runner() -> Runner:
+    """Create and cache the ADK Runner + session service."""
+    session_service = InMemorySessionService()
+    return Runner(
+        agent=root_agent,
+        app_name=APP_NAME,
+        session_service=session_service,
     )
-    
-    # Initialize orchestrator
-    orchestrator = Orchestrator(endpoint=endpoint)
-    
-    # Initialize conversation management
-    session_manager = SessionManager()
-    context_manager = ContextManager()
-    memory_store = MemoryStore()
-    
-    # Initialize parsers
-    pdf_parser = PDFParser()
-    text_parser = TextParser()
-    
-    logger.info("MedSight system initialized successfully")
-    
-    return {
-        'orchestrator': orchestrator,
-        'session_manager': session_manager,
-        'context_manager': context_manager,
-        'memory_store': memory_store,
-        'pdf_parser': pdf_parser,
-        'text_parser': text_parser
-    }
 
 
-def process_uploaded_image(uploaded_file, image_id: str) -> MedicalImage:
-    """Process uploaded image file"""
-    image = Image.open(uploaded_file)
-    
-    # Convert to base64
-    buffered = BytesIO()
-    image.save(buffered, format="PNG")
-    img_bytes = buffered.getvalue()
-    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-    
-    # Create MedicalImage
-    medical_image = MedicalImage(
-        image_id=image_id,
-        image_type=ImageType.UNKNOWN,  # Could be inferred from filename or user input
-        image_data=img_b64,
-        width=image.size[0],
-        height=image.size[1]
-    )
-    
-    return medical_image
-
-
-def process_uploaded_document(uploaded_file, record_id: str) -> MedicalRecord:
-    """Process uploaded document file"""
-    file_type = uploaded_file.name.split('.')[-1].lower()
-    content = ""
-    document_format = DocumentFormat.TEXT
-    
-    try:
-        if file_type == 'pdf':
-            document_format = DocumentFormat.PDF
-            pdf_reader = PyPDF2.PdfReader(uploaded_file)
-            text_parts = []
-            for page in pdf_reader.pages:
-                text = page.extract_text()
-                if text:
-                    text_parts.append(text)
-            content = "\n\n".join(text_parts)
-            
-        elif file_type == 'txt':
-            document_format = DocumentFormat.TEXT
-            stringio = BytesIO(uploaded_file.getvalue())
-            content = stringio.read().decode("utf-8")
-            
-        else:
-            # Fallback for other types
-            content = f"Uploaded file: {uploaded_file.name}"
-            
-        return MedicalRecord(
-            record_id=record_id,
-            record_type=RecordType.OTHER, # Will be inferred by parser later
-            document_format=document_format,
-            content=content,
-            file_path=uploaded_file.name
+def get_or_create_session(runner: Runner) -> str:
+    """Ensure a stable session_id is stored in Streamlit session state."""
+    if "adk_session_id" not in st.session_state:
+        sid = str(uuid.uuid4())
+        st.session_state["adk_session_id"] = sid
+        asyncio.run(
+            runner.session_service.create_session(
+                app_name=APP_NAME,
+                user_id="streamlit_user",
+                session_id=sid,
+                state={},
+            )
         )
-        
-    except Exception as e:
-        logger.error(f"Error processing document {uploaded_file.name}: {e}")
-        return None
+    return st.session_state["adk_session_id"]
+
+
+# ---------------------------------------------------------------------------
+# File processing helpers
+# ---------------------------------------------------------------------------
+
+def process_image_upload(uploaded_file) -> str:
+    """Return base64-encoded PNG string from an uploaded image."""
+    img = Image.open(uploaded_file).convert("RGB")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def process_document_upload(uploaded_file) -> str:
+    """Extract text from PDF or TXT upload."""
+    ext = uploaded_file.name.rsplit(".", 1)[-1].lower()
+    if ext == "pdf":
+        reader = PyPDF2.PdfReader(uploaded_file)
+        pages = [p.extract_text() or "" for p in reader.pages]
+        return "\n\n".join(pages)
+    else:
+        return BytesIO(uploaded_file.getvalue()).read().decode("utf-8", errors="replace")
+
+
+# ---------------------------------------------------------------------------
+# ADK call wrapper
+# ---------------------------------------------------------------------------
+
+async def run_agent_async(runner: Runner, session_id: str, message: str) -> str:
+    """Send a message to the ADK agent and collect the final text response."""
+    user_content = genai_types.Content(
+        role="user",
+        parts=[genai_types.Part(text=message)],
+    )
+    final_text = ""
+    async for event in runner.run_async(
+        user_id="streamlit_user",
+        session_id=session_id,
+        new_message=user_content,
+    ):
+        if event.is_final_response() and event.content and event.content.parts:
+            final_text = "".join(p.text for p in event.content.parts if hasattr(p, "text"))
+    return final_text or "No response generated."
+
+
+def run_agent(runner: Runner, session_id: str, message: str) -> str:
+    """Synchronous wrapper around run_agent_async for Streamlit."""
+    return asyncio.run(run_agent_async(runner, session_id, message))
+
+
+# ---------------------------------------------------------------------------
+# Main UI
+# ---------------------------------------------------------------------------
+
+def build_prompt(
+    query: str,
+    image_b64: str = "",
+    record_content: str = "",
+) -> str:
+    """
+    Build the full prompt sent to the ADK agent, embedding any uploaded
+    image/document as context alongside the user query.
+    """
+    parts = [f"User question: {query}"]
+
+    if image_b64:
+        parts.append(
+            "\n[CONTEXT] A medical image has been uploaded. "
+            "Call analyze_medical_image with exactly these arguments:\n"
+            f"image_b64 = {json.dumps(image_b64)}\n"
+            f"image_type = {json.dumps(st.session_state.get('image_type', 'unknown'))}\n"
+            f"query = {json.dumps(query)}"
+        )
+    if record_content:
+        parts.append(
+            f"\n[CONTEXT] A medical record/document has been uploaded.\n"
+            f"Use the parse_medical_record tool with the following content:\n"
+            f"---\n{record_content[:3000]}\n---"
+        )
+
+    if image_b64 and record_content:
+        parts.append(
+            "\nAfter analyzing both the image and the record, use synthesize_findings "
+            "to produce a comprehensive report."
+        )
+
+    return "\n".join(parts)
 
 
 def main():
-    """Main application"""
-    
-    # Initialize system
-    system = initialize_system()
-    orchestrator = system['orchestrator']
-    session_manager = system['session_manager']
-    context_manager = system['context_manager']
-    memory_store = system['memory_store']
-    
-    # Header
-    st.markdown('<h1 class="main-header">🏥 MedSight - AI Medical Assistant</h1>', unsafe_allow_html=True)
-    
-    # Disclaimer
+    runner     = get_runner()
+    session_id = get_or_create_session(runner)
+
+    # --- Header ---
+    st.markdown('<h1 class="main-header">🏥 MedSight</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">AI-Powered Medical Image & Record Analysis — Powered by Google ADK + MedGemma</p>', unsafe_allow_html=True)
+
     st.markdown("""
     <div class="disclaimer-box">
-        <strong>⚕️ MEDICAL DISCLAIMER:</strong> This AI system is for informational purposes only and is not a substitute 
-        for professional medical advice, diagnosis, or treatment. Always seek the advice of your physician or other 
-        qualified health provider with any questions you may have regarding a medical condition.
+        <strong>⚕️ MEDICAL DISCLAIMER:</strong> This AI system is for <strong>informational purposes only</strong>
+        and is NOT a substitute for professional medical advice, diagnosis, or treatment.
+        Always seek the advice of your physician or qualified health provider.
     </div>
     """, unsafe_allow_html=True)
-    
-    # Initialize session state
-    if 'session_id' not in st.session_state:
-        st.session_state.session_id = session_manager.create_session()
-        st.session_state.patient_data = PatientData(patient_id="demo_patient")
-    
-    # Sidebar
+
+    # --- Sidebar: uploads ---
     with st.sidebar:
-        st.image("images/gemini_avatar.png", width=100)
-        st.markdown("### 📁 Upload Files")
-        
+        try:
+            st.image("images/gemini_avatar.png", width=90)
+        except Exception:
+            st.markdown("### 🏥 MedSight")
+
+        st.markdown("## 📁 Upload Files")
+
         # Image upload
-        uploaded_images = st.file_uploader(
-            "Upload Medical Images",
+        st.markdown("### 🩻 Medical Image")
+        uploaded_image = st.file_uploader(
+            "Upload X-ray, MRI, CT scan…",
             type=["jpg", "jpeg", "png"],
-            accept_multiple_files=True,
-            help="Upload X-rays, MRIs, CT scans, etc."
+            key="img_uploader",
         )
-        
-        if uploaded_images:
-            for idx, img_file in enumerate(uploaded_images):
-                medical_image = process_uploaded_image(img_file, f"image_{idx}")
-                
-                # Add to patient data if not already added
-                existing_ids = [img.image_id for img in st.session_state.patient_data.images]
-                if medical_image.image_id not in existing_ids:
-                    st.session_state.patient_data.add_image(medical_image)
-                    st.success(f"✅ Added: {img_file.name}")
-                
-                # Display thumbnail
-                st.image(img_file, caption=img_file.name, use_column_width=True)
-        
+        image_type_options = ["unknown", "xray", "mri", "ct", "ultrasound", "pathology"]
+        image_type = st.selectbox("Image type", image_type_options, key="image_type")
+
+        if uploaded_image:
+            st.image(uploaded_image, caption=uploaded_image.name, use_column_width=True)
+            if "uploaded_image_b64" not in st.session_state or st.session_state.get("_last_img") != uploaded_image.name:
+                st.session_state["uploaded_image_b64"] = process_image_upload(uploaded_image)
+                st.session_state["_last_img"] = uploaded_image.name
+                st.success(f"✅ Image loaded: {uploaded_image.name}")
+
         # Document upload
-        uploaded_docs = st.file_uploader(
-            "Upload Medical Records",
+        st.markdown("### 📄 Medical Record")
+        uploaded_doc = st.file_uploader(
+            "Upload PDF or TXT record",
             type=["pdf", "txt"],
-            accept_multiple_files=True,
-            help="Upload medical records, visit notes, lab results, etc."
+            key="doc_uploader",
         )
-        
-        if uploaded_docs:
-            for idx, doc_file in enumerate(uploaded_docs):
-                medical_record = process_uploaded_document(doc_file, f"doc_{idx}")
-                
-                if medical_record and medical_record.content.strip():
-                     # Add to patient data if not already added
-                    existing_ids = [rec.record_id for rec in st.session_state.patient_data.records]
-                    if medical_record.record_id not in existing_ids:
-                        st.session_state.patient_data.add_record(medical_record)
-                        st.success(f"✅ Added: {doc_file.name}")
-                    
-                    st.info(f"📄Parsed {len(medical_record.content)} chars from {doc_file.name}")
-                else:
-                    st.error(f"Failed to process {doc_file.name}")
-        
+        if uploaded_doc:
+            if "uploaded_record_content" not in st.session_state or st.session_state.get("_last_doc") != uploaded_doc.name:
+                st.session_state["uploaded_record_content"] = process_document_upload(uploaded_doc)
+                st.session_state["_last_doc"] = uploaded_doc.name
+            char_count = len(st.session_state["uploaded_record_content"])
+            st.success(f"✅ Record loaded: {uploaded_doc.name} ({char_count:,} chars)")
+
         st.markdown("---")
-        
-        # Session info
-        st.markdown("### 📊 Session Info")
-        session = session_manager.get_session(st.session_state.session_id)
-        if session:
-            st.write(f"Messages: {len(session.messages)}")
-            st.write(f"Images: {len(st.session_state.patient_data.images)}")
-            st.write(f"Records: {len(st.session_state.patient_data.records)}")
-        
-        # Clear button
-        if st.button("🗑️ Clear Session"):
-            st.session_state.session_id = session_manager.create_session()
-            st.session_state.patient_data = PatientData(patient_id="demo_patient")
-            st.rerun()
-    
-    # Main chat interface
-    st.markdown("### 💬 Conversation")
-    
-    # Display conversation history
-    session = session_manager.get_session(st.session_state.session_id)
-    
-    if session and session.messages:
-        for msg in session.messages:
-            with st.chat_message(msg.role):
-                st.markdown(msg.content)
-                if msg.images:
-                    st.caption(f"📷 {len(msg.images)} image(s) attached")
-    else:
-        with st.chat_message("assistant"):
-            st.markdown("Hello! I'm MedSight, your AI medical assistant. How may I help you today?")
-    
-    # Chat input
-    if prompt := st.chat_input("Ask about medical images, records, or medical questions..."):
-        # Add user message
-        user_message = Message(
-            role=MessageRole.USER,
-            content=prompt
+
+        # Session stats
+        st.markdown("### 📊 Session")
+        history = st.session_state.get("chat_history", [])
+        col1, col2 = st.columns(2)
+        col1.metric("Messages", len(history))
+        col2.metric(
+            "Files",
+            int(bool(st.session_state.get("uploaded_image_b64"))) +
+            int(bool(st.session_state.get("uploaded_record_content")))
         )
-        session_manager.add_message(st.session_state.session_id, user_message)
-        
+
+        if st.button("🗑️ Clear Session", use_container_width=True):
+            for key in ["chat_history", "uploaded_image_b64", "uploaded_record_content",
+                        "_last_img", "_last_doc", "adk_session_id"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+
+    # --- Chat history ---
+    st.markdown("### 💬 Conversation")
+
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+
+    if not st.session_state["chat_history"]:
+        with st.chat_message("assistant"):
+            st.markdown(
+                "Hello! I'm **MedSight**, your AI medical assistant. "
+                "Upload medical images or records in the sidebar, then ask me a question. "
+                "I can analyze imaging, parse clinical documents, and answer medical questions."
+            )
+
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # --- Chat input ---
+    if prompt := st.chat_input("Ask about medical images, records, or medical questions…"):
         # Display user message
         with st.chat_message("user"):
             st.markdown(prompt)
-        
-        # Process with orchestrator
+        st.session_state["chat_history"].append({"role": "user", "content": prompt})
+
+        # Build full prompt with any uploaded context
+        full_prompt = build_prompt(
+            query          = prompt,
+            image_b64      = st.session_state.get("uploaded_image_b64", ""),
+            record_content = st.session_state.get("uploaded_record_content", ""),
+        )
+
+        # Call ADK agent
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing..."):
-                # Prepare input for orchestrator
-                conversation_history = [
-                    {'role': msg.role, 'content': msg.content}
-                    for msg in session.messages
-                ]
-                
-                orchestrator_input = {
-                    'query': prompt,
-                    'patient_data': st.session_state.patient_data,
-                    'conversation_history': conversation_history
-                }
-                
-                # Run orchestrator (async)
+            with st.spinner("🔬 Analyzing…"):
                 try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    result = loop.run_until_complete(
-                        orchestrator.execute(orchestrator_input)
-                    )
-                    loop.close()
-                    
-                    if result.success:
-                        response_text = result.data.get('answer', 'No response generated.')
-                        
-                        # Display response
-                        st.markdown(response_text)
-                        
-                        # Show confidence if available
-                        if result.confidence:
-                            confidence_pct = result.confidence * 100
-                            st.caption(f"Confidence: {confidence_pct:.1f}%")
-                        
-                        # Add assistant message
-                        assistant_message = Message(
-                            role=MessageRole.ASSISTANT,
-                            content=response_text
-                        )
-                        session_manager.add_message(st.session_state.session_id, assistant_message)
-                        
-                    else:
-                        error_msg = f"⚠️ Error: {result.error}"
-                        st.error(error_msg)
-                        
-                        assistant_message = Message(
-                            role=MessageRole.ASSISTANT,
-                            content=error_msg
-                        )
-                        session_manager.add_message(st.session_state.session_id, assistant_message)
-                
-                except Exception as e:
-                    logger.error(f"Error processing request: {e}", exc_info=True)
-                    st.error(f"An error occurred: {str(e)}")
-    
-    # Footer
+                    response = run_agent(runner, session_id, full_prompt)
+                    st.markdown(response)
+                    st.session_state["chat_history"].append({"role": "assistant", "content": response})
+
+                    # Show active tools badge
+                    active = []
+                    if st.session_state.get("uploaded_image_b64"):
+                        active.append("🩻 Image Analysis")
+                    if st.session_state.get("uploaded_record_content"):
+                        active.append("📄 Record Parsing")
+                    if active:
+                        st.markdown(" ".join(f'<span class="badge">{a}</span>' for a in active), unsafe_allow_html=True)
+
+                except Exception as exc:
+                    logger.error("Agent error: %s", exc, exc_info=True)
+                    st.error(f"An error occurred: {exc}")
+
+    # --- Footer ---
     st.markdown("---")
-    st.markdown("""
-    <div style='text-align: center; color: #666; font-size: 0.9rem;'>
-        MedSight v2.0 | Powered by MedGemma | Built with ❤️ for Healthcare
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        "<div style='text-align:center;color:#9aa0a6;font-size:0.82rem;'>"
+        "MedSight v3.0 · Google ADK · MedGemma · Gemini · Built with ❤️ for Healthcare"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":

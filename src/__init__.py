@@ -1,31 +1,22 @@
 """
 MedSight - AI-Powered Medical Assistant
 
-A comprehensive, conversational, multi-modal medical AI assistant with 
-healthcare-specific guardrails and multi-agent intelligence.
-
-Version: 2.0.0
+Version: 3.0.0 (ADK Edition)
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 __author__ = "MedSight Team"
-__description__ = "AI-Powered Medical Assistant with Multi-Agent Intelligence"
+__description__ = "AI-Powered Medical Assistant — Google ADK Multi-Agent System"
 
-# Core imports for easy access
-from .agents import Orchestrator, BaseAgent
-from .models import PatientData, MedicalImage, MedicalRecord
-from .guardrails import InputValidator, OutputValidator, SafetyChecker
-from .conversation import SessionManager, ContextManager
+# Core ADK agent
+from .agents import root_agent  # noqa: F401
+
+# Data models (still used by UI)
+from .models import PatientData, MedicalImage, MedicalRecord  # noqa: F401
 
 __all__ = [
-    'Orchestrator',
-    'BaseAgent',
-    'PatientData',
-    'MedicalImage',
-    'MedicalRecord',
-    'InputValidator',
-    'OutputValidator',
-    'SafetyChecker',
-    'SessionManager',
-    'ContextManager',
+    "root_agent",
+    "PatientData",
+    "MedicalImage",
+    "MedicalRecord",
 ]
