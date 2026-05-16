@@ -295,7 +295,7 @@ class Orchestrator(BaseAgent):
             Refined result
         """
         # Check if refinement is needed
-        if result.confidence >= 0.85:
+        if result.confidence >= 0.6:
             self.logger.info("High confidence - skipping reflexion")
             return result
         
