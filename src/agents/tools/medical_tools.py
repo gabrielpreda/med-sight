@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import re
+import requests
+import httpx
 from io import BytesIO
 from typing import Optional
 
@@ -193,7 +195,7 @@ Return ONLY valid JSON, no markdown:
 User query: "{query[:500]}"
 """
         resp = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-2.5-flash",
             contents=prompt,
             config={"response_mime_type": "application/json"},
         )
@@ -216,87 +218,79 @@ User query: "{query[:500]}"
 # ---------------------------------------------------------------------------
 # Tool 1  –  Medical image analysis  (MedGemma dedicated endpoint)
 # ---------------------------------------------------------------------------
+def is_valid_json(text: str) -> bool:
+    try:
+        json.loads(text)
+        return True
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_MODEL = "medgemma1.5:4b"  # or medgemma:27b
+
 
 def analyze_medical_image(
     image_b64: str,
     image_type: str = "unknown",
     query: str = "Analyze this medical image and provide detailed findings.",
+    provider: str = "ollama",
 ) -> str:
     """
-    Analyze a medical image using the MedGemma model on Vertex AI.
-
-    Args:
-        image_b64: Base64-encoded PNG/JPEG image bytes.
-        image_type: Type of scan – xray | mri | ct | ultrasound | pathology | unknown.
-        query: Specific clinical question from the user.
-
-    Returns:
-        JSON string with keys: summary, anatomical_structures, findings,
-        abnormalities, impression, recommendations, image_quality.
-        On failure returns JSON with an 'error' key.
+    provider:
+      - "gcp"    -> current Vertex AI / Model Garden endpoint
+      - "ollama" -> local Ollama endpoint
     """
+    logger.warning("ADK TOOL SELECTED: analyze_medical_image")
+
     system_prompt = f"""
-You are a highly experienced medical imaging AI assisting radiologists.
+        You are a highly experienced medical imaging AI assisting radiologists.
 
-Analyze the provided {image_type} image and produce a clear, clinically useful report.
-Focus on:
-- Visible anatomical structures
-- Abnormalities, masses, infiltrates, fractures, fluid collections
-- Whether the scan appears normal or requires further evaluation
+        Analyze the provided {image_type} image and produce a clear, clinically useful report.
+        Focus on:
+        - Visible anatomical structures
+        - Abnormalities, masses, infiltrates, fractures, fluid collections
+        - Whether the scan appears normal or requires further evaluation
 
-Rules:
-- Return VALID JSON ONLY – no markdown, no code fences, no extra text.
-- Use this exact structure:
+        Rules:
+        - Return VALID JSON ONLY – no markdown, no code fences, no extra text.
+        - Use this exact structure:
 
-{{
-  "summary": "2-3 sentence overview",
-  "anatomical_structures": ["structure 1"],
-  "findings": [{{"finding": "Observation 1"}}],
-  "abnormalities": [{{"description": "Abnormality 1"}}],
-  "impression": "Clinical impression",
-  "recommendations": ["Recommendation 1"],
-  "image_quality": {{"assessed": true, "quality": "good"}}
-}}
-"""
+        {{
+        "summary": "2-3 sentence overview",
+        "anatomical_structures": ["structure 1"],
+        "findings": [{{"finding": "Observation 1"}}],
+        "abnormalities": [{{"description": "Abnormality 1"}}],
+        "impression": "Clinical impression",
+        "recommendations": ["Recommendation 1"],
+        "image_quality": {{"assessed": true, "quality": "good"}}
+        }}
+    """
+
     try:
-        endpoint = _get_medgemma_endpoint()
-        data_url = f"data:image/png;base64,{image_b64}"
+        provider = provider.lower().strip()
+        print(f"Provider: {provider}")
 
-        instances = [
-            {
-                "@requestFormat": "chatCompletions",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": [{"type": "text", "text": system_prompt}],
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text",      "text": query},
-                            {"type": "image_url", "image_url": {"url": data_url}},
-                        ],
-                    },
-                ],
-                "max_tokens": 2500,
-                "temperature": 0.0,
-            }
-        ]
+        if provider == "gcp":
+            raw = _call_medgemma_gcp(
+                image_b64=image_b64,
+                system_prompt=system_prompt,
+                query=query,
+            )
 
-        response = endpoint.predict(instances=instances, use_dedicated_endpoint=True)
+        elif provider == "ollama":
+            raw =  _call_medgemma_ollama(
+                image_b64=image_b64,
+                system_prompt=system_prompt,
+                query=query,
+            )
 
-        # ChatCompletion response format
-        pred = response.predictions
-        if isinstance(pred, dict) and "choices" in pred:
-            raw = pred["choices"][0]["message"]["content"]
-        elif isinstance(pred, str):
-            raw = pred
         else:
-            raw = str(pred)
+            raise ValueError("Invalid provider. Use 'gcp' or 'ollama'.")
 
-        print(f"Raw response: {raw}")
+        print(f"Raw response from {provider}: {raw}")
 
         cleaned = _clean_json(raw)
+
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
@@ -307,8 +301,108 @@ Rules:
 
     except Exception as exc:
         logger.error("analyze_medical_image failed: %s", exc, exc_info=True)
-        return json.dumps({"error": str(exc), "summary": "Image analysis failed."})
+        return json.dumps({
+            "error": str(exc),
+            "summary": "Image analysis failed."
+        })
 
+
+def _call_medgemma_gcp(
+    image_b64: str,
+    system_prompt: str,
+    query: str,
+) -> str:
+    endpoint = _get_medgemma_endpoint()
+    data_url = f"data:image/png;base64,{image_b64}"
+
+    instances = [
+        {
+            "@requestFormat": "chatCompletions",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": system_prompt}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": query},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url},
+                        },
+                    ],
+                },
+            ],
+            "max_tokens": 2500,
+            "temperature": 0.0,
+        }
+    ]
+
+
+    response = endpoint.predict(
+        instances=instances,
+        use_dedicated_endpoint=True,
+    )
+
+    pred = response.predictions
+
+    if isinstance(pred, dict) and "choices" in pred:
+        return pred["choices"][0]["message"]["content"]
+
+    if isinstance(pred, str):
+        return pred
+
+    return str(pred)
+
+
+def _call_medgemma_ollama(
+    image_b64: str,
+    system_prompt: str,
+    query: str,
+) -> str:
+    print("========================")
+    print(f"Query: {query}")
+    print("========================")
+    logger.warning("ADK TOOL SELECTED: _call_medgemma_ollama")
+    logger.warning(f"Query: {query}")
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": query,
+                "images": [image_b64],
+            },
+        ],
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": 0.0,
+            "num_predict": 2500,
+        },
+    }
+
+    # timeout = httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=5.0)
+    # async with httpx.AsyncClient(timeout=timeout) as client:
+    #     response = await client.post(OLLAMA_URL, json=payload)
+
+    response = requests.post(
+        OLLAMA_URL,
+        json=payload,
+        timeout=150,
+    )
+    response.raise_for_status()
+    print("========================")
+    print(f"Response: {response}")
+    print("========================")
+
+    return response.json()["message"]["content"]
 
 # ---------------------------------------------------------------------------
 # Tool 2  –  Medical record parsing  (Gemini + regex)

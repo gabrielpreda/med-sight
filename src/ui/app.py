@@ -31,6 +31,7 @@ from google.genai import types as genai_types
 
 # MedSight ADK agent
 from src.agents import root_agent
+from src.agents.tools.medical_tools import analyze_medical_image, is_valid_json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -156,20 +157,43 @@ def process_document_upload(uploaded_file) -> str:
 # ---------------------------------------------------------------------------
 
 async def run_agent_async(runner: Runner, session_id: str, message: str) -> str:
-    """Send a message to the ADK agent and collect the final text response."""
     user_content = genai_types.Content(
         role="user",
         parts=[genai_types.Part(text=message)],
     )
+
     final_text = ""
+    tool_outputs = []
+
     async for event in runner.run_async(
         user_id="streamlit_user",
         session_id=session_id,
         new_message=user_content,
     ):
-        if event.is_final_response() and event.content and event.content.parts:
-            final_text = "".join(p.text for p in event.content.parts if hasattr(p, "text"))
-    return final_text or "No response generated."
+        logger.warning("ADK EVENT: %s", event)
+
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                text = getattr(part, "text", None)
+                if text:
+                    final_text += text
+
+                function_call = getattr(part, "function_call", None)
+                if function_call:
+                    logger.warning("ADK FUNCTION CALL: %s", function_call)
+
+                function_response = getattr(part, "function_response", None)
+                if function_response:
+                    logger.warning("ADK FUNCTION RESPONSE: %s", function_response)
+                    tool_outputs.append(str(function_response.response))
+
+    if final_text.strip():
+        return final_text.strip()
+
+    if tool_outputs:
+        return "\n\n".join(tool_outputs)
+
+    return "No response generated."
 
 
 def run_agent(runner: Runner, session_id: str, message: str) -> str:
@@ -323,12 +347,41 @@ def main():
             record_content = st.session_state.get("uploaded_record_content", ""),
         )
 
+        image_response = None
         # Call ADK agent
         with st.chat_message("assistant"):
             with st.spinner("🔬 Analyzing…"):
                 try:
-                    response = run_agent(runner, session_id, full_prompt)
+                    if st.session_state.get("uploaded_image_b64"):
+                        image_response = analyze_medical_image(
+                            image_b64=st.session_state["uploaded_image_b64"],
+                            image_type=st.session_state.get("image_type", "unknown"),
+                            query=prompt,
+                            provider="ollama",
+                        )
+
+                    if is_valid_json(image_response):
+                        st.json(image_response)
+                        response = image_response
+                    
+                    if st.session_state.get("uploaded_record_content") and image_response:
+                        record_content = st.session_state.get("uploaded_record_content", "")
+
+                        full_prompt = build_prompt(
+                            query          = f"{prompt}; Image analysis: {image_response}",
+                            record_content = record_content,
+                        )
+                        response = run_agent(runner, session_id, full_prompt)
+
+                    else:
+                        full_prompt = build_prompt(
+                            query          = prompt,
+                            record_content = st.session_state.get("uploaded_record_content", ""),
+                        )
+                        response = run_agent(runner, session_id, full_prompt)
+        
                     st.markdown(response)
+                    
                     st.session_state["chat_history"].append({"role": "assistant", "content": response})
 
                     # Show active tools badge

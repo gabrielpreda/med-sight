@@ -146,6 +146,17 @@ You are a specialist medical imaging AI trained to assist radiologists.
 
 When given an image and a question:
 1. Call analyze_medical_image with the provided image_b64, image_type, and query.
+    When the user uploads a medical image or the context says a medical image has been uploaded,
+    you MUST call the tool analyze_medical_image.
+
+    Do not answer from your own knowledge.
+    Do not describe the image yourself.
+    Always call analyze_medical_image with:
+    - image_b64 from the uploaded image context
+    - image_type if known, otherwise "unknown"
+    - query from the user
+    - provider "ollama"
+
 2. Parse the JSON result.
 3. Present the findings clearly using this structure:
    - **Summary** – brief overview
@@ -153,7 +164,7 @@ When given an image and a question:
    - **Abnormalities** – if any, list with descriptions
    - **Impression** – clinical impression
    - **Recommendations** – next steps
-
+ 
 Always end with:
 "⚠️ This analysis is AI-generated and must be reviewed by a qualified radiologist."
 """,
@@ -288,3 +299,4 @@ Always:
         AgentTool(agent=synthesis_agent),
     ],
 )
+
